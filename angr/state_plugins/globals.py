@@ -2,6 +2,7 @@
 import logging
 
 from .plugin import SimStatePlugin
+import copy
 
 l = logging.getLogger('angr.state_plugins.globals')
 
@@ -51,7 +52,9 @@ class SimStateGlobals(SimStatePlugin):
     def get(self, k, alt=None):
         return self._backer.get(k, alt)
 
+    #HZ: We must use deepcopy here since 'globals' can hold another dict or other complex objects,
+    #one example is the 'loop_ctrs' dict used in veritesting.
     def copy(self):
-        return SimStateGlobals(dict(self._backer))
+        return SimStateGlobals(copy.deepcopy(self._backer))
 
 SimStatePlugin.register_default('globals', SimStateGlobals)

@@ -464,7 +464,8 @@ class SimState(ana.Storable): # pylint: disable=R0904
         if len(kwargs) != 0:
             raise ValueError("invalid arguments: %s" % kwargs.keys())
 
-        if merge_conditions is None:
+        #HZ: Here we implement a customized state option: IGNORE_MERGE_CONDITIONS
+        if merge_conditions is None or o.IGNORE_MERGE_CONDITIONS in self.options:
             # TODO: maybe make the length of this smaller? Maybe: math.ceil(math.log(len(others)+1, 2))
             merge_flag = self.se.BVS("state_merge_%d" % merge_counter.next(), 16)
             merge_values = range(len(others)+1)
@@ -836,6 +837,28 @@ class SimState(ana.Storable): # pylint: disable=R0904
     @deprecated
     def reachable(self):
         return self.history.reachable()
+
+    #
+    #HZ: I have to add several more member functions here for sim_state.
+    #
+
+    #Previously we can use 'loop limiter' as an exploration_technique to prevent angr from dealing with back-edges.
+    #The loop limiter assumes that 'path_group' constitutes 'path' and it relies on 'detect_loops()' method of the 'path'
+    #to decide whether this path has loop and how many. BUT, current angr has 'SimulationManager' replace 'path_group' and
+    #'state' replace 'path', while 'state' doesn't have 'detect_loops()' method...
+    import itertools
+    def detect_loops(self, n = 3):
+        '''
+        #A simple method: count the number of basic blocks appearing repeatedly in the 'addr_trace' and return the largest one. 
+        addrs = [x for x in self.history.bbl_addrs]
+        return max([len(list(g)) for k,g in itertools.groupby(addrs)]) - 1
+        '''
+        addr_strs = [ "%x"%x for x in self.history.bbl_addrs ]
+        if n > len(addr_strs):
+            return 0
+        bigstr = "".join(addr_strs)
+        c = "".join(addr_strs[-n-0:])
+        return bigstr.count(c) - 1
 
 from .state_plugins.symbolic_memory import SimSymbolicMemory
 from .state_plugins.fast_memory import SimFastMemory

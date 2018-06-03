@@ -13,7 +13,6 @@ class SimIRExpr_Load(SimIRExpr):
 
         # get the address expression and track stuff
         addr = self._translate_expr(self._expr.addr)
-
         if o.UNINITIALIZED_ACCESS_AWARENESS in self.state.options:
             if getattr(addr.expr._model_vsa, 'uninitialized', False):
                 raise SimUninitializedAccessError('addr', addr.expr)

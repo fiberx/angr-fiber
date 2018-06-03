@@ -85,3 +85,5 @@ from .norepeats_range import SimConcretizationStrategyNorepeatsRange
 from .range import SimConcretizationStrategyRange
 from .single import SimConcretizationStrategySingle
 from .solutions import SimConcretizationStrategySolutions
+#HZ: Our new strategy.
+from .hz import SimConcretizationStrategyHZ

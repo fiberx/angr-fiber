@@ -97,7 +97,12 @@ class SimSuccessors(object):
         # First, trigger the SimInspect breakpoint
         state._inspect('exit', BP_BEFORE, exit_target=target, exit_guard=guard, exit_jumpkind=jumpkind)
         state.scratch.target = state._inspect_getattr("exit_target", target)
-        state.scratch.guard = state._inspect_getattr("exit_guard", guard)
+        #HZ: Add some supports for 'IGNORE_EXIT_GUARDS' here.
+        if o.IGNORE_EXIT_GUARDS in state.options:
+            state.scratch.guard = claripy.true
+            add_guard = False
+        else:
+            state.scratch.guard = state._inspect_getattr("exit_guard", guard)
         state.history.jumpkind = state._inspect_getattr("exit_jumpkind", jumpkind)
         state.history.jump_target = state.scratch.target
         state.history.jump_guard = state.scratch.guard

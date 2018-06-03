@@ -185,6 +185,12 @@ class SimOS(object):
             kwargs['memory_backer'] = self.project.loader.memory
         if kwargs.get('os_name', None) is None:
             kwargs['os_name'] = self.name
+        #HZ: symbolic_sp
+        if 'symbolic_sp' in kwargs:
+            symbolic_sp = kwargs['symbolic_sp']
+            kwargs.pop('symbolic_sp')
+        else:
+            symbolic_sp = False
 
         state = SimState(self.project, **kwargs)
 
@@ -224,6 +230,14 @@ class SimOS(object):
                 state.registers.store(reg, address)
             else:
                 state.registers.store(reg, val)
+
+        #HZ: Implement SYMBOLIC_SP here, we still want to use this 'stack_end' but we don't want to 'sp' to be concrete.
+        #So (1) Create symbolic value for sp and (2) add a constraint that 'sp == default_value'
+        if symbolic_sp:
+            (off,size) = state.arch.registers['sp']
+            s_sp = claripy.BVS('reg_%x' % off, size*8)
+            state.add_constraints(s_sp == state.regs.sp)
+            state.regs.sp = s_sp
 
         if addr is None: addr = self.project.entry
         state.regs.ip = addr

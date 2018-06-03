@@ -15,8 +15,11 @@ class LoopLimiter(ExplorationTechnique):
 
     def step(self, pg, stash, **kwargs):
         pg = pg.step(stash=stash, **kwargs).move(stash, self.discard_stash,
-                lambda path: path.detect_loops() >= self.count)
+                lambda path: path.detect_loops() > self.count)
+        #HZ: Holy shit why do we need this?
+        '''
         if len(pg.stashes[stash]) == 0 and len(pg.stashes[self.discard_stash]) > 0:
             pg.stashes[stash].append(pg.stashes[self.discard_stash].pop())
+        '''
         return pg
 

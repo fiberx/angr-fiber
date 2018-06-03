@@ -254,6 +254,22 @@ TRACK_SOLVER_VARIABLES = "TRACK_SOLVER_VARIABLES"
 # Efficient state merging requires potential state ancestors being kept in memory
 EFFICIENT_STATE_MERGING = "EFFICIENT_STATE_MERGING"
 
+#HZ: Add some custom options that we will use and implement.
+#---------------------------start--------------------------
+#When we do state merging, (1) ignore all the merge conditions. (simply use sth like merge_flag_%d == N)
+#(2) if len(to_merge) == 1, then just ignore its related condition. (i.e. don't make if(marge_flag.) 'xxx' else 0, just make 'xxx')
+IGNORE_MERGE_CONDITIONS = "IGNORE_MERGE_CONDITIONS"
+
+#when merging symbolic memory plugins, some bytes may not present in all plugins. In this case the default
+#behavior is to create unconstrained bytes for those plugins, which will make the formula more complicated
+#and somehow meaningless for our purpose. This option will simply ignore these unconstrained bytes.
+DONT_MERGE_UNCONSTRAINED = 'DONT_MERGE_UNCONSTRAINED'
+
+#By default the 'sp' will be assigned a concrete value when a state is created, which causes troubles
+#for us since we want 'sp' to appear in our formulas. So we create this option.
+SYMBOLIC_SP = 'SYMBOLIC_SP'
+#----------------------------end---------------------------
+
 #
 # CGC specific state options
 #

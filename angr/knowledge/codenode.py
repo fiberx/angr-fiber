@@ -26,8 +26,10 @@ class CodeNode(object):
     def __ne__(self, other):
         return not self == other
 
-    def __cmp__(self, other):
-        raise TypeError("Comparison with a code node")
+    #HZ: when we do graph match, vf2 algorithm in networkx needs to compare these codenode (min())
+    #so we have to disable this __cmp__ definition.
+    #def __cmp__(self, other):
+    #    raise TypeError("Comparison with a code node")
 
     def __hash__(self):
         return hash((self.addr, self.size))

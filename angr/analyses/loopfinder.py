@@ -33,30 +33,39 @@ class LoopFinder(Analysis):
     Extracts all the loops from all the functions in a binary.
     """
 
-    def __init__(self, functions=None, normalize=True):
-        if functions is None:
-            functions = self.kb.functions.itervalues()
+    #HZ: Add a simpler interface to the LoopFinder, which simply accepts a DiGraph and do the analysis.
+    def __init__(self, functions=None, normalize=True, graph=None):
+        if graph is None:
+            #The code below is the original interface.
+            if functions is None:
+                functions = self.kb.functions.itervalues()
 
-        found_any = False
-        self.loops = []
-        self.loops_hierarchy = {}
-        for function in functions:
+            found_any = False
+            self.loops = []
+            self.loops_hierarchy = {}
+            for function in functions:
 
-            if self.project.is_hooked(function.addr) or \
-                    self.project._simos.is_syscall_addr(function.addr):
-                # skip SimProcedures and syscalls
-                continue
+                if self.project.is_hooked(function.addr) or \
+                        self.project._simos.is_syscall_addr(function.addr):
+                    # skip SimProcedures and syscalls
+                    continue
 
-            found_any = True
+                found_any = True
+                with self._resilience():
+                    if normalize:
+                        function.normalize()
+                    tops, alls = self._parse_loops_from_graph(function.graph)
+                    self.loops += alls
+                    self.loops_hierarchy[function.addr] = tops
+
+            if not found_any:
+                l.error("No knowledge of functions is present. Did you forget to construct a CFG?")
+        else:
+            #Below is the new interface we added.
+            self.loops = []
             with self._resilience():
-                if normalize:
-                    function.normalize()
-                tops, alls = self._parse_loops_from_graph(function.graph)
+                tops, alls = self._parse_loops_from_graph(graph)
                 self.loops += alls
-                self.loops_hierarchy[function.addr] = tops
-
-        if not found_any:
-            l.error("No knowledge of functions is present. Did you forget to construct a CFG?")
 
     def _parse_loop_graph(self, subg, bigg):
         """

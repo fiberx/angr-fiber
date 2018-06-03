@@ -556,9 +556,14 @@ class CFGBase(Analysis):
                         memory_regions.append(tpl)
 
             elif isinstance(b, Blob):
+                #HZ: original code here is WRONG when we have base relocation when loading the blob.
+                #HZ: We should use the assignment after 'if not memory_regions:' later.
+                memory_regions = []
+                '''
                 # a blob is entirely executable
                 tpl = (b.min_addr, b.max_addr)
                 memory_regions.append(tpl)
+                '''
 
             elif isinstance(b, (ExternObject, KernelObject, TLSObject)):
                 pass

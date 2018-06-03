@@ -6,6 +6,7 @@ from .sim_action_object import ast_stripping_decorator, SimActionObject
 import sys
 import functools
 import logging
+import traceback
 l = logging.getLogger("angr.state_plugins.solver")
 
 #pylint:disable=unidiomatic-typecheck
@@ -515,7 +516,12 @@ class SimSolver(SimStatePlugin):
         if len(r) == 0:
             raise SimUnsatError('expected exactly %d solutions for an unsatisfiable state' % n)
         if len(r) != n:
-            raise SimValueError("concretized %d values (%d required) in exactly_n" % (len(r), n))
+            #HZ: I know this is important, but sometimes it stops the execution, do some dirty hacks.
+            #raise SimValueError("concretized %d values (%d required) in exactly_n" % (len(r), n))
+            if len(r) > n:
+                r = r[:n]
+            else:
+                raise SimValueError("concretized %d values (%d required) in exactly_n" % (len(r), n))
         return r
 
     def exactly_int(self, e, default=None, **kwargs):

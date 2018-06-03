@@ -203,10 +203,13 @@ class SimEngineVEX(SimEngine):
         #breakpoint that relies on the end statement of *this* instruction, not the initial IMark of *next* instruction.
         for stmt_idx, stmt in enumerate(ss):
             if isinstance(stmt, pyvex.IRStmt.IMark):
-                #HZ: Part 1 of our 'real instruction BP_AFTER breakpoint'
-                if insn_addrs:
+                #HZ
+                if len(insn_addrs) <> 0:
                     state._inspect('instruction', BP_AFTER, instruction=insn_addrs[-1])
                 insn_addrs.append(stmt.addr + stmt.delta)
+            elif stmt_idx >= len(ss)-1 and len(insn_addrs) <> 0:
+                #HZ: Deal with the instruction at the end.
+                state._inspect('instruction', BP_AFTER, instruction=insn_addrs[-1])
 
             if stmt_idx < skip_stmts:
                 l.debug("Skipping statement %d", stmt_idx)
@@ -236,11 +239,6 @@ class SimEngineVEX(SimEngine):
                 l.warning("%#x hit an error while analyzing statement %d", successors.addr, stmt_idx, exc_info=True)
                 has_default_exit = False
                 break
-
-            #HZ: Part 2 of our 'real instruction BP_AFTER breakpoint'.
-            if stmt_idx >= len(ss)-1 and insn_addrs:
-                #HZ: Deal with the instruction at the end.
-                state._inspect('instruction', BP_AFTER, instruction=insn_addrs[-1])
 
         state.scratch.stmt_idx = num_stmts
 
@@ -371,27 +369,36 @@ class SimEngineVEX(SimEngine):
             if dbg:
                 print '+++++++++++++++++++++++++++++++++++++++++++++++++'
                 print 'I am at %x' % state.history.recent_ins_addrs[-1]
-            if o.IGNORE_EXIT_GUARDS not in state.options:
-                #Here is the original logic
+            add_guard = False if o.IGNORE_EXIT_GUARDS in state.options else True
+            if o.IGNORE_EXIT_GUARDS not in state.options or s_stmt.guard.symbolic:
                 if dbg:
                     print 'Do nothing, guard %s, target: %s' % (str(s_stmt.guard),str(s_stmt.target))
                 successors.add_successor(exit_state, s_stmt.target, s_stmt.guard, s_stmt.jumpkind,
-                                         exit_stmt_idx=state.scratch.stmt_idx, exit_ins_addr=state.scratch.ins_addr)
+                                         exit_stmt_idx=state.scratch.stmt_idx, exit_ins_addr=state.scratch.ins_addr, add_guard=add_guard)
 
                 # Do our bookkeeping on the continuing state
                 cont_condition = claripy.Not(s_stmt.guard)
-                state.add_constraints(cont_condition)
+                if add_guard:
+                    state.add_constraints(cont_condition)
                 state.scratch.guard = claripy.And(state.scratch.guard, cont_condition)
             else:
-                #HZ: I wanna be free.
-                #We have some code inside 'add_successor' function to deal with 'IGNORE_EXIT_GUARDS', so no special things to do here.
-                successors.add_successor(exit_state, s_stmt.target, s_stmt.guard, s_stmt.jumpkind,
-                                         exit_stmt_idx=state.scratch.stmt_idx, exit_ins_addr=state.scratch.ins_addr)
+                #HZ: the option is set, and the guard is not symbolic.
+                guard = s_stmt.guard
+                if state.se.is_false(guard):
+                    guard = state.se.BoolS('fake_trans_%x_%x' % (state.history.recent_ins_addrs[-1],state.se.any_int(s_stmt.target)))
+                if dbg:
+                    print 'o_guard: %s, now: %s, target: %s' % (str(s_stmt.guard),str(guard),str(s_stmt.target))
+                successors.add_successor(exit_state, s_stmt.target, guard, s_stmt.jumpkind,
+                                         exit_stmt_idx=state.scratch.stmt_idx, exit_ins_addr=state.scratch.ins_addr, add_guard=add_guard)
                 #HZ: what about the continuing state?
-                #(1) We don't add the constraints to the state.
-                #(2) But we still need to provide real constraint in the 'scratch', because later it will be used in 'add_successor' to add
-                #this continuing successor, and we need to record this real constraint in the 'exit' breakpoint.
-                state.scratch.guard = claripy.And(state.scratch.guard, claripy.Not(s_stmt.guard))
+                cont_condition = claripy.Not(s_stmt.guard)
+                if state.se.is_false(cont_condition):
+                    cont_condition = state.se.BoolS('fake_trans_%x_cont' % (state.history.recent_ins_addrs[-1]))
+                if dbg:
+                    print 'cont_condition: %s' % (str(cont_condition))
+                if add_guard:
+                    state.add_constraints(cont_condition)
+                state.scratch.guard = claripy.And(state.scratch.guard, cont_condition)
             if dbg:
                 print '----------------------------------------------------'
 

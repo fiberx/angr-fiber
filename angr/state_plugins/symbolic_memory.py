@@ -2,6 +2,7 @@
 
 import logging
 import itertools
+import re
 
 l = logging.getLogger("angr.state_plugins.symbolic_memory")
 
@@ -191,6 +192,10 @@ class SimSymbolicMemory(SimMemory): #pylint:disable=abstract-method
                 merged_bytes.add(b)
 
             else:
+                #HZ: implement the 'DONT_MERGE_UNCONSTRAINED' option here, which will ignore the unconstrained input bytes.
+                if options.DONT_MERGE_UNCONSTRAINED in self.state.options:
+                    unconstrained_in = []
+
                 # get the size that we can merge easily. This is the minimum of
                 # the size of all memory objects and unallocated spaces.
                 min_size = min([mo.length - (b - mo.base) for mo, _ in memory_objects])
@@ -209,6 +214,8 @@ class SimSymbolicMemory(SimMemory): #pylint:disable=abstract-method
                     (self.get_unconstrained_bytes("merge_uc_%s_%x" % (uc.id, b), min_size * 8), fv) for
                     uc, fv in unconstrained_in
                 ]
+
+
                 to_merge = extracted + created
 
                 merged_val = self._merge_values(to_merge, min_size, is_widening=is_widening)
@@ -219,6 +226,8 @@ class SimSymbolicMemory(SimMemory): #pylint:disable=abstract-method
                             and self.state.se.backends.vsa.identical(merged_val, to_merge[0][0]):
                         continue
 
+                #print 'merged_val: ' + str(merged_val)
+                #HZ: original code use 'Iend_BE', why? I change it to 'LE'
                 self.store(b, merged_val, endness='Iend_BE', inspect=False)  # do not convert endianness again
 
                 merged_bytes.add(b)
@@ -770,6 +779,11 @@ class SimSymbolicMemory(SimMemory): #pylint:disable=abstract-method
             size = len(sv)/8
             self.state.scratch.dirty_addrs.update(range(a, a+size))
             mo = SimMemoryObject(sv, a, length=size)
+            '''
+            print 'object: ' + str(sv)
+            print 'base: ' + str(hex(a))
+            print 'store(): ' + str(mo)
+            '''
             self.mem.store_memory_object(mo)
 
         l.debug("... done")
@@ -927,11 +941,76 @@ class SimSymbolicMemory(SimMemory): #pylint:disable=abstract-method
 
             if should_reverse: merged_val = merged_val.reversed
         else:
-            merged_val = self.state.se.BVV(0, merged_size*8)
-            for tm,fv in to_merge:
-                merged_val = self.state.se.If(fv, tm, merged_val)
+            #HZ: Make some changes here if 'IGNORE_MERGE_CONDITIONS' is set, 
+            #(1) if only one element is in to_merge, return it directly
+            #(2) else, don't make '0' as the default value.
+            if options.IGNORE_MERGE_CONDITIONS in self.state.options:
+                #HZ: Do an extra trick here: regarding things like 'mem_40_1_64' and 'mem_40_2_64' as the same.
+                #If the formulas behind them are the same, then we are good, if not, then it's a addr-collision, which we have
+                #already tried hard to avoid in HZ concretization strategy.
+                seen = set()
+                to_merge_flt = []
+                for tm in to_merge:
+                    terms = self._extract_merged_if_terms(tm[0])
+                    for t in terms:
+                        n = self._mask_num_suffix(str(t))
+                        if not n in seen:
+                            seen.add(n)
+                            to_merge_flt.append(t)
+                if len(to_merge_flt) == 1:
+                    return to_merge_flt[0]
+                elif len(to_merge_flt) > 1:
+                    #The 'if' condition is actually not important at all here, but we still need them to 'glue' the values together.
+                    cond = to_merge[0][1]
+                    i = self._is_trivial_merge_cond(cond)
+                    #i should be always >= 0 since we have already specified IGNORE_MERGE_CONDITIONS option, otherwise we will get exceptions here.
+                    cond_sym = cond.args[i]
+                    merged_val = to_merge_flt[0]
+                    for i in range(1,len(to_merge_flt)):
+                        merged_val = self.state.se.If(cond_sym == i, to_merge_flt[i], merged_val)
+                else:
+                    #Shit, this should be impossible..
+                    print '!!!!!!! Nothing to merge after flt..'
+                    merged_val = self.state.se.BVV(0, merged_size*8)
+            else:
+                #HZ: this is the default behavior w/o 'IGNORE_MERGE_CONDITIONS' option set.
+                merged_val = self.state.se.BVV(0, merged_size*8)
+                for tm,fv in to_merge:
+                    merged_val = self.state.se.If(fv, tm, merged_val)
+                #print merged_val
 
         return merged_val
+
+    #HZ: Add utility function
+    def _is_trivial_merge_cond(self,f):
+        regex = 'state_merge_[\da-f]+_[\d]+_[\d]+'
+        if f.op <> '__eq__':
+            return -1
+        if re.search(regex,str(f.args[0])) is not None:
+            return 0
+        if re.search(regex,str(f.args[1])) is not None:
+            return 1
+        return -1
+
+    #HZ: Add utility function
+    def _extract_merged_if_terms(self,f):
+        if f.op == 'If' and self._is_trivial_merge_cond(f.args[0]) >= 0:
+            return self._extract_merged_if_terms(f.args[1]).union(self._extract_merged_if_terms(f.args[2]))
+        else:
+            return set([f])
+
+    #HZ: Adds an auxilary method, borrowed directly from HZ conc strategy.
+    def _mask_num_suffix(self,s):
+        regex = '(reg|mem)_[\da-f]+_[\d]+_[\d]+'
+        def _mask(s):
+            if s is not str:
+                s = s.group(0)
+            tokens = s.split('_')
+            if len(tokens) <> 4:
+                return s
+            tokens.pop(-2)
+            return '_'.join(tokens)
+        return re.sub(regex,_mask,s)
 
     def concrete_parts(self):
         """

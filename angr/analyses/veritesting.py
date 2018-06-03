@@ -1,5 +1,6 @@
 import logging
 from collections import defaultdict
+import copy
 
 import networkx
 from . import Analysis, register_analysis
@@ -11,6 +12,7 @@ from ..errors import AngrError, AngrCFGError
 from ..manager import SimulationManager
 
 l = logging.getLogger("angr.analyses.veritesting")
+l.setLevel(logging.DEBUG)
 
 
 class VeritestingError(Exception):
@@ -167,9 +169,18 @@ class Veritesting(Analysis):
     # Names of all stashes we will return from Veritesting
     all_stashes = ('successful', 'errored', 'deadended', 'deviated', 'unconstrained')
 
+    #HZ: When we exit the Veritesting mode, it will return its internal SimManager with and only with the stashes listed in
+    #'self.all_stashes'. However, when we want to apply 'exploration_techniques' to this internal SimManager, we may end up
+    #with extra stashes introduced by these techniques, for which we may also want to return to the normal DSE SimManager.
+    #For now I add two (default) stashes used by 'explorer' technique.
+    tech_stashes = ('found', 'avoid')
+
+    #HZ: We need do some modifications to Veritesting component:
+    #(1) Add the 'tech' option to its constructor, since Veritesting will internally construct a new SimManager to do the veritesting,
+    #sometimes we want this manager use some exploration techniques (e.g. explorer) as well.
     def __init__(
         self, input_state, boundaries=None, loop_unrolling_limit=10, enable_function_inlining=False,
-        terminator=None, deviation_filter=None
+        terminator=None, deviation_filter=None, tech=None
     ):
         """
         SSE stands for Static Symbolic Execution, and we also implemented an extended version of Veritesting (Avgerinos,
@@ -183,6 +194,7 @@ class Veritesting(Analysis):
                                          if this function returns True.
         :param deviation_filter:         A callback function that takes a state as parameter. Veritesting will put the
                                          state into "deviated" stash if this function returns True.
+        :param tech:                     the exploration_technique that should be used in the SimManager when doing veritesting.
         """
         block = self.project.factory.block(input_state.addr)
         branches = block.vex.constant_jump_targets_and_jumpkinds
@@ -199,6 +211,8 @@ class Veritesting(Analysis):
         self._enable_function_inlining = enable_function_inlining
         self._terminator = terminator
         self._deviation_filter = deviation_filter
+        #HZ: record the 'tech' option
+        self._tech = tech
 
         # set up the cfg stuff
         self._cfg, self._loop_graph = self._make_cfg()
@@ -217,7 +231,12 @@ class Veritesting(Analysis):
         else:
             l.debug("Function inlining is disabled.")
 
+        #print '---------------------Enter Veritesting-------------------------'
         self.result, self.final_manager = self._veritesting()
+        #if self.final_manager is not None:
+        #    for name, stash in self.final_manager.stashes.items():
+        #        print name + str([hex(x.addr) for x in stash])
+        #print '---------------------Leave Veritesting-------------------------'
 
     def _veritesting(self):
         """
@@ -282,6 +301,9 @@ class Veritesting(Analysis):
             immutable=False,
             resilience=o.BYPASS_VERITESTING_EXCEPTIONS in initial_state.options
         )
+        #HZ: Apply the 'exploration_technique' if there are any.
+        if self._tech is not None:
+            manager.use_technique(self._tech)
 
         # Initialize all stashes
         for stash in self.all_stashes:
@@ -300,12 +322,19 @@ class Veritesting(Analysis):
                 manager.stash(filter_func=self._deviation_filter, from_stash='active', to_stash='deviated')
 
             # Mark all those paths that are out of boundaries as successful
+            #HZ: Note that 'is_overbound()' check BOTH overbound and overloop, so 'successful' stash holds two
+            #types of stashes: overbound AND overloop. The 'bound' is totally defined by user by pass-in parameter.
             manager.stash(
                 filter_func=self.is_overbound,
                 from_stash='active', to_stash='successful'
             )
 
             manager.step(successor_func=self._get_successors)
+
+            l.debug('After Step: %s with %d active states: [ %s ]',
+                    manager,
+                    len(manager.active),
+                    manager.active)
 
             if self._terminator is not None and self._terminator(manager):
                 for p in manager.unfuck:
@@ -338,22 +367,59 @@ class Veritesting(Analysis):
                     to_stash="_merge_%x_%d" % (merge_point_addr, merge_point_looping_times)
                 )
 
-            # Try to merge a set of previously stashed paths, and then unstash them
-            if not manager.active:
-                manager = self._join_merge_points(manager, merge_points)
-        if any(len(manager.stashes[stash_name]) for stash_name in self.all_stashes):
-            # Remove all stashes other than errored or deadended
-            manager.stashes = {
-                name: stash for name, stash in manager.stashes.items()
-                if name in self.all_stashes
-            }
+            '''
+            print '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
+            for merge_point_addr, merge_point_looping_times in merge_points:
+                n = "_merge_%x_%d" % (merge_point_addr, merge_point_looping_times)
+                if n not in manager.stashes or len(manager.stashes[n]) == 0:
+                    continue
+                print n
+                for st in manager.stashes[n]:
+                    d = st.globals['loop_ctrs']
+                    for k in d:
+                        print '%x:%d' % (k,d[k])
+            '''
 
-            for stash in manager.stashes:
-                manager.apply(self._unfuck, stash=stash)
+            # Try to merge a set of previously stashed paths, and then unstash them
+            #HZ: Currently we cannot guarantee that each merge will produce some 'active' states, since sometimes
+            #the merged states can go into other stashes like 'successful', so we should keep trying here.
+            while not manager.active and any([s.startswith('_merge_') and manager.stashes[s] for s in manager.stashes]):
+                manager = self._join_merge_points(manager, merge_points)
+
+        #HZ: I rewrite the original logic here.
+        # Remove all stashes other than errored or deadended
+        #HZ: Keep the stashes in 'tech_stashes' as well
+        manager.stashes = {
+            name: stash for name, stash in manager.stashes.items()
+            if name in self.all_stashes or name in self.tech_stashes
+        }
+
+        #HZ: We may need to do some hacks here for 'explorer' technique, at this point, it's possible that
+        #some states have already been moved to 'found' stash, however, they may still have the potential
+        #to be merged together since in the loop above only states in 'active' stash will be merged.
+        #HZ: Actively merge the states in 'found' stash.
+        mp_list = []
+        for merge_point_addr, merge_point_looping_times in merge_points:
+            ms_str = '_merge_%x_%d' % (merge_point_addr, merge_point_looping_times)
+            manager.stash_addr(
+                merge_point_addr,
+                from_stash='found',
+                to_stash=ms_str
+            )
+            if len(manager.stashes[ms_str]) > 0:
+                mp_list.append((merge_point_addr, merge_point_looping_times))
+        if len(mp_list) > 0:
+            #We have some states to be merged.
+            l.debug('Trying to merge found stash, current state: %s',manager)
+            for mp in mp_list:
+                manager = self._join_merge_points(manager,[mp],'found')
+        for stash in manager.stashes:
+            manager.apply(self._unfuck, stash=stash)
 
         return manager
 
-    def _join_merge_points(self, manager, merge_points):
+    #HZ: we add a parameter 'to_stash' to this function, which serves as the target stash of merged states.
+    def _join_merge_points(self, manager, merge_points, to_stash='active'):
         """
         Merges together the appropriate execution points and unstashes them from the intermidiate merge_x_y stashes to
         pruned (dropped), deadend or active stashes
@@ -375,12 +441,14 @@ class Veritesting(Analysis):
             if stash_size == 0:
                 continue
             if stash_size == 1:
-                l.info("Skipping merge of 1 state in stash %s.", stash_size)
-                manager.move(stash_name, 'active')
+                l.info("Skipping merge of 1 state in stash %s.", stash_name)
+                manager.move(stash_name, to_stash)
                 continue
 
             # let everyone know of the impending disaster
             l.info("Merging %d states in stash %s", stash_size, stash_name)
+
+            #HZ: TODO: Maybe here we should also prune those overlooping states?
 
             # Try to prune the stash, so unsatisfiable states will be thrown away
             manager.prune(from_stash=stash_name, to_stash='pruned')
@@ -392,44 +460,69 @@ class Veritesting(Analysis):
             # merge things callstack by callstack
             while len(manager.stashes[stash_name]):
                 r = manager.stashes[stash_name][0]
+                #HZ: Because currently merge for callstack hasn't been implemented yet by Angr, so we have the 'lambda'
+                #function here: states with different callstacks cannot be merged.
+                #HZ: For now we force ALL states to be merged, regardless whether they have the same callstack.
                 manager.move(
                     stash_name, 'merge_tmp',
-                    lambda p: p.callstack == r.callstack #pylint:disable=cell-var-from-loop
+                    lambda p: p.callstack == r.callstack or True #pylint:disable=cell-var-from-loop
                 )
 
                 old_count = len(manager.merge_tmp)
                 l.debug("... trying to merge %d states.", old_count)
 
                 # merge the loop_ctrs
+                #HZ: 'globals' is a state plugin that provides an information dictionary for each state.
+                #It has its own 'merge' method which simply update one state's globals with the other one's
+                #using non-existent keys. Below logic intends to bypass this default merge strategy.
                 new_loop_ctrs = defaultdict(int)
                 for m in manager.merge_tmp:
                     for head_addr, looping_times in m.globals['loop_ctrs'].iteritems():
+                        #HZ: The original code below looks stupid. Aren't the 'looping_times' and the 'm.globals['loop_ctrs'][head_addr]' the same?
+                        '''
                         new_loop_ctrs[head_addr] = max(
                             looping_times,
                             m.globals['loop_ctrs'][head_addr]
                         )
+                        '''
+                        new_loop_ctrs[head_addr] = max(
+                            looping_times,
+                            new_loop_ctrs[head_addr]
+                        )
 
                 manager.merge(stash='merge_tmp')
+
+                #HZ: NOTE: The 'loop_ctrs' dict is *very* tricky..
+                #HZ: (1) It's stored in 'globals' state plugin, the 'globals' itself is a dict and 'loop_ctrs' is a keyword in 'globals',
+                #while the 'loop_ctrs' value is also a dict. The thing is that 'copy()' method of 'globals' plugin will only do a shallow
+                #copy, which means the 'loop_ctrs' dict can be actually shared by multiple states with completely different execution traces,
+                #which is TOTALLY WRONG and will mess things up.
+                #(2) Here even we are sure that these merged states will have same 'loop_ctrs' dict for NOW, we'd better still make a separate
+                #copy for each state in case of future problems.
+                #P.S. I have already change copy() method in 'globals' to let it make a deepcopy.
                 for m in manager.merge_tmp:
-                    m.globals['loop_ctrs'] = new_loop_ctrs
+                    #For the copy of 'loop_ctrs' dict itself, we can just use normal 'copy' since key and value are all primitive types. 
+                    m.globals['loop_ctrs'] = copy.copy(new_loop_ctrs)
 
                 new_count = len(manager.stashes['merge_tmp'])
                 l.debug("... after merge: %d states.", new_count)
 
                 merged_anything |= new_count != old_count
 
+                #HZ: here I replace original default stash string 'active' to the added 'to_stash' parameter. 
                 if len(manager.merge_tmp) > 1:
                     l.warning("More than 1 state after Veritesting merge.")
-                    manager.move('merge_tmp', 'active')
+                    manager.move('merge_tmp', to_stash)
                 elif any(
                     loop_ctr >= self._loop_unrolling_limit + 1 for loop_ctr in
                     manager.one_merge_tmp.globals['loop_ctrs'].itervalues()
                 ):
                     l.debug("... merged state is overlooping")
-                    manager.move('merge_tmp', 'deadended')
+                    #HZ: if it's overlooping, it should be put into 'successful' stash instead of 'deadended' as we do earlier in the code, right?
+                    manager.move('merge_tmp', 'successful')
                 else:
                     l.debug('... merged state going to active stash')
-                    manager.move('merge_tmp', 'active')
+                    manager.move('merge_tmp', to_stash)
 
         return manager
 
@@ -488,6 +581,33 @@ class Veritesting(Analysis):
                 l.debug('... terminating Veritesting due to overlooping')
                 return True
 
+        '''
+        #HZ: Add a smarter overloop check here, previously, if we only want 1 loop execution,
+        #we can only realize that a state is overlooping when it's at the end of the 2nd loop,
+        #now we want to make sure that as long as a state finishes its 1st loop, it will not
+        #even enter the 2nd loop, thus more efficient.
+        addrs =  state.history.bbl_addrs.hardcopy
+        #print str([hex(x) for x in addrs])
+        #Locate the latest loop head
+        for i in range(len(addrs)-1,-1,-1):
+            if addrs[i] in state.globals['loop_ctrs']:
+                break
+        if i < len(addrs)-1 and addrs[i] in state.globals['loop_ctrs'] and state.globals['loop_ctrs'][addrs[i]] == self._loop_unrolling_limit:
+            #May already on the verge of overlooping
+            #Locate second to last loop head
+            for j in range(i-1,-1,-1):
+                if addrs[j] == addrs[i]:
+                    break
+            if addrs[j] == addrs[i] and i-j >= len(addrs)-i:
+                #Now compare the sequences starting from j and i
+                for k in range(len(addrs)-i):
+                    if addrs[j+k] <> addrs[i+k]:
+                        break
+                if addrs[j+k] == addrs[i+k]:
+                    l.debug('... Killing a loop, %s',str([hex(x) for x in addrs[j:]]))
+                    return True
+        '''
+
         l.debug('... accepted')
         return False
 
@@ -539,6 +659,7 @@ class Veritesting(Analysis):
                 if not state.se.symbolic(state.regs.rax):
                     cfg_initial_state.regs.rax = state.regs.rax
 
+            #print 'Constructing CFGAcc for: ' + str(hex(ip_int))
             cfg = self.project.analyses.CFGAccurate(
                 starts=((ip_int, state.history.jumpkind),),
                 context_sensitivity_level=0,
@@ -548,6 +669,7 @@ class Veritesting(Analysis):
                 normalize=True,
                 kb=KnowledgeBase(self.project, self.project.loader.main_object)
             )
+            #print 'Finish: ' + str(len(cfg.nodes()))
             cfg_graph_with_loops = networkx.DiGraph(cfg.graph)
             cfg.force_unroll_loops(self._loop_unrolling_limit)
             self.cfg_cache[cfg_key] = (cfg, cfg_graph_with_loops)
