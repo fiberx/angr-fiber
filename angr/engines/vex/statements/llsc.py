@@ -1,4 +1,4 @@
-from pyvex import type_sizes
+from pyvex import get_type_size
 from . import SimIRStmt
 
 import logging
